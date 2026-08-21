@@ -1,0 +1,13 @@
+# GPU template: choose a CUDA/cuDNN base that matches your exact PyTorch build.
+# On the verified DGX environment, preserve its preinstalled NVIDIA PyTorch.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends python3.10 python3.10-venv python3-pip ffmpeg libglib2.0-0 libgl1 && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt ./
+RUN python3.10 -m pip install --upgrade pip && python3.10 -m pip install -r requirements.txt
+# Install the PyTorch wheel/build explicitly matched to this CUDA image.
+COPY . .
+RUN mkdir -p uploads outputs temp logs frames static/reports
+EXPOSE 5000
+CMD ["python3.10","app.py"]

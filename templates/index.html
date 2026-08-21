@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wrong Lane Vehicle Detection</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <div class="eyebrow">AI TRAFFIC SAFETY</div>
+    <h1>🚦 Wrong Lane Vehicle Detection</h1>
+    <p>Upload a traffic video, run YOLO + ByteTrack analysis, and review the annotated result.</p>
+  </div>
+  <div class="status-pill"><span></span> Device: {{ device|upper }}</div>
+</header>
+
+<main class="container">
+  <section class="card upload-card">
+    <div id="dropZone" class="drop-zone">
+      <div class="upload-icon">🎥</div>
+      <h2>Upload Traffic Video</h2>
+      <p>Drag & drop your video here or choose a file.</p>
+      <p class="muted">MP4 · AVI · MOV · MKV · WebM · WMV</p>
+      <input id="videoInput" type="file" accept="video/*,.mkv,.avi,.mov,.wmv,.webm" hidden>
+      <button id="chooseBtn" class="primary">Choose Video</button>
+    </div>
+    <div id="fileInfo" class="file-info hidden"></div>
+    <div id="uploadProgressWrap" class="progress-wrap hidden">
+      <div class="progress-label"><span>Uploading…</span><strong id="uploadPercent">0%</strong></div>
+      <div class="progress"><i id="uploadProgress"></i></div>
+    </div>
+    <div class="controls">
+      <button id="startBtn" class="primary" disabled>▶ Start Detection</button>
+      <button id="resetBtn" class="secondary" disabled>↻ Reset</button>
+    </div>
+  </section>
+
+  <section class="card live-card">
+    <div class="section-head"><h2>📡 Live IP Camera Detection</h2><span id="liveStatus">Stopped</span></div>
+    <p class="muted">Enter a camera stream reachable from this server. Supports RTSP, HTTP/MJPEG and HTTPS camera URLs. A numeric source such as <code>0</code> uses a webcam attached directly to the server.</p>
+    <div class="live-controls">
+      <input id="cameraUrl" type="text" placeholder="rtsp://user:password@192.168.1.100:554/stream" autocomplete="off">
+      <button id="liveStartBtn" class="primary">▶ Start Live Detection</button>
+      <button id="liveStopBtn" class="secondary" disabled>■ Stop</button>
+    </div>
+    <div class="live-grid">
+      <div class="live-video"><img id="liveFeed" alt="Live camera detection stream"></div>
+      <div class="live-stats">
+        <div><b id="liveFps">0</b><span>Live FPS</span></div>
+        <div><b id="liveVehicles">0</b><span>Vehicles</span></div>
+        <div class="danger"><b id="liveWrong">0</b><span>Wrong Lane</span></div>
+        <div><b id="liveDevice">{{ device|upper }}</b><span>Device</span></div>
+      </div>
+    </div>
+    <div id="liveError" class="error hidden"></div>
+  </section>
+
+  <section class="card settings-card">
+    <h2>Detection Settings</h2>
+    <div class="settings-grid">
+      <label>Confidence <input id="confidence" type="number" min="0.1" max="0.95" step="0.05" value="0.50"></label>
+      <label>IoU <input id="iou" type="number" min="0.1" max="0.95" step="0.05" value="0.45"></label>
+      <label>Frame interval <input id="frameInterval" type="number" min="1" max="10" step="1" value="1"></label>
+      <div class="info">Processing device: <b>{{ device|upper }}</b><br>FFmpeg: <b>{{ "Available" if ffmpeg_available else "Not found (fallback)" }}</b></div>
+    </div>
+  </section>
+
+  <section class="videos">
+    <div class="video-card">
+      <div class="section-head"><h2>Original Video</h2><span id="originalMeta">Waiting for upload</span></div>
+      <video id="originalVideo" controls playsinline></video>
+    </div>
+    <div class="video-card">
+      <div class="section-head"><h2>Detected Output</h2><span id="outputStatus">Not processed</span></div>
+      <video id="outputVideo" controls playsinline></video>
+    </div>
+  </section>
+
+  <section class="card progress-card">
+    <div class="section-head"><h2>Processing Status</h2><span id="statusText">Ready</span></div>
+    <div class="progress-label"><span id="processLabel">Waiting for detection</span><strong id="processPercent">0%</strong></div>
+    <div class="progress"><i id="processProgress"></i></div>
+    <div class="metrics">
+      <div><b id="frames">0 / 0</b><span>Frames</span></div>
+      <div><b id="processingFps">0</b><span>Processing FPS</span></div>
+      <div><b id="vehicles">0</b><span>Vehicles</span></div>
+      <div class="danger"><b id="wrongLane">0</b><span>Wrong Lane</span></div>
+      <div><b id="processingTime">—</b><span>Processing Time</span></div>
+      <div><b id="device">—</b><span>Device</span></div>
+    </div>
+    <div id="errorBox" class="error hidden"></div>
+    <a id="reportLink" class="report-link hidden">Download Detection Report</a>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let uploadedFilename = null, jobId = null, pollTimer = null;
+
+$('chooseBtn').onclick = () => $('videoInput').click();
+$('dropZone').onclick = e => { if (e.target !== $('chooseBtn')) $('videoInput').click(); };
+$('videoInput').onchange = () => uploadFile($('videoInput').files[0]);
+
+['dragenter','dragover'].forEach(ev => $('dropZone').addEventListener(ev, e => {
+  e.preventDefault(); $('dropZone').classList.add('dragging');
+}));
+['dragleave','drop'].forEach(ev => $('dropZone').addEventListener(ev, e => {
+  e.preventDefault(); $('dropZone').classList.remove('dragging');
+}));
+$('dropZone').addEventListener('drop', e => uploadFile(e.dataTransfer.files[0]));
+
+function showError(msg) {
+  $('errorBox').textContent = msg;
+  $('errorBox').classList.remove('hidden');
+}
+function clearError() { $('errorBox').classList.add('hidden'); $('errorBox').textContent = ''; }
+
+function uploadFile(file) {
+  if (!file) return;
+  clearError();
+  const form = new FormData(); form.append('video', file);
+  $('uploadProgressWrap').classList.remove('hidden');
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const p = Math.round(e.loaded / e.total * 100);
+      $('uploadPercent').textContent = p + '%'; $('uploadProgress').style.width = p + '%';
+    }
+  };
+  xhr.onload = () => {
+    try {
+      const data = JSON.parse(xhr.responseText);
+      if (!data.success) throw new Error(data.message || 'Upload failed.');
+      uploadedFilename = data.filename;
+      $('fileInfo').classList.remove('hidden');
+      $('fileInfo').textContent = `${data.original_name} • ${(file.size/1024/1024).toFixed(2)} MB • ${data.metadata.width}×${data.metadata.height} • ${data.metadata.fps.toFixed(2)} FPS • ${data.metadata.duration.toFixed(1)} sec`;
+      $('originalMeta').textContent = `${data.metadata.width}×${data.metadata.height} • ${data.metadata.fps.toFixed(2)} FPS`;
+      $('originalVideo').src = URL.createObjectURL(file);
+      $('startBtn').disabled = false; $('resetBtn').disabled = false;
+      $('statusText').textContent = 'Upload complete';
+    } catch (e) { showError(e.message); }
+  };
+  xhr.onerror = () => showError('Network error while uploading the video.');
+  xhr.send(form);
+}
+
+$('startBtn').onclick = async () => {
+  if (!uploadedFilename) return;
+  clearError(); $('startBtn').disabled = true;
+  $('statusText').textContent = 'Starting…';
+  try {
+    const r = await fetch('/api/process', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        filename: uploadedFilename,
+        confidence: parseFloat($('confidence').value),
+        iou: parseFloat($('iou').value),
+        frame_interval: parseInt($('frameInterval').value)
+      })
+    });
+    const data = await r.json();
+    if (!data.success) throw new Error(data.message);
+    jobId = data.job_id; pollProgress();
+  } catch (e) { showError(e.message); $('startBtn').disabled = false; }
+};
+
+async function pollProgress() {
+  clearTimeout(pollTimer);
+  try {
+    const r = await fetch('/api/progress/' + jobId);
+    const d = await r.json();
+    if (!d.success) throw new Error(d.message);
+    const p = Number(d.progress || 0);
+    $('processPercent').textContent = p + '%';
+    $('processProgress').style.width = p + '%';
+    $('statusText').textContent = d.status;
+    $('processLabel').textContent = d.message || 'Processing…';
+    $('frames').textContent = `${d.frames_processed || 0} / ${d.total_frames || 0}`;
+    $('processingFps').textContent = d.processing_fps || d.stats?.processing_fps || 0;
+    $('vehicles').textContent = d.stats?.total_vehicles || 0;
+    $('wrongLane').textContent = d.stats?.wrong_lane_vehicles || 0;
+    $('device').textContent = d.device || d.stats?.device || '—';
+    if (d.processing_time) $('processingTime').textContent = d.processing_time + ' s';
+
+    if (d.status === 'completed') {
+      $('outputVideo').src = d.output_url + '?t=' + Date.now();
+      $('outputVideo').load();
+      $('outputStatus').textContent = 'Ready to play ✓';
+      $('reportLink').href = d.report_url;
+      $('reportLink').classList.remove('hidden');
+      $('startBtn').disabled = false;
+      return;
+    }
+    if (d.status === 'failed') {
+      showError(d.message + (d.error ? ' ' + d.error : ''));
+      $('startBtn').disabled = false;
+      return;
+    }
+    pollTimer = setTimeout(pollProgress, 500);
+  } catch (e) {
+    showError('Could not read processing status: ' + e.message);
+    $('startBtn').disabled = false;
+  }
+}
+
+
+let liveTimer = null;
+$('liveStartBtn').onclick = async () => {
+  const source = $('cameraUrl').value.trim();
+  if (!source) { $('liveError').textContent = 'Enter an IP camera URL.'; $('liveError').classList.remove('hidden'); return; }
+  $('liveError').classList.add('hidden');
+  $('liveStartBtn').disabled = true;
+  try {
+    const r = await fetch('/api/live/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      source, confidence:parseFloat($('confidence').value), iou:parseFloat($('iou').value), frame_interval:parseInt($('frameInterval').value)
+    })});
+    const d = await r.json();
+    if (!d.success) throw new Error(d.message);
+    $('liveStatus').textContent = 'Connecting…';
+    $('liveStopBtn').disabled = false;
+    $('liveFeed').src = '/live/feed?t=' + Date.now();
+    pollLiveStatus();
+  } catch(e) {
+    $('liveError').textContent = e.message;
+    $('liveError').classList.remove('hidden');
+    $('liveStartBtn').disabled = false;
+  }
+};
+$('liveStopBtn').onclick = async () => {
+  await fetch('/api/live/stop', {method:'POST'});
+  $('liveFeed').removeAttribute('src');
+  $('liveStatus').textContent = 'Stopped';
+  $('liveStopBtn').disabled = true; $('liveStartBtn').disabled = false;
+  clearTimeout(liveTimer);
+};
+async function pollLiveStatus() {
+  try {
+    const r = await fetch('/api/live/status'); const d = await r.json();
+    $('liveStatus').textContent = d.status || 'Stopped';
+    const st = d.stats || {};
+    $('liveFps').textContent = st.fps || 0; $('liveVehicles').textContent = st.vehicles || 0;
+    $('liveWrong').textContent = st.wrong_lane_vehicles || 0; $('liveDevice').textContent = st.device || '—';
+    if (d.error) { $('liveError').textContent = d.error; $('liveError').classList.remove('hidden'); }
+    if (d.status === 'running' || d.status === 'starting') liveTimer = setTimeout(pollLiveStatus, 700);
+    else { $('liveStartBtn').disabled = false; $('liveStopBtn').disabled = true; }
+  } catch(e) { liveTimer = setTimeout(pollLiveStatus, 1500); }
+}
+
+$('resetBtn').onclick = () => location.reload();
+</script>
+</body>
+</html>
